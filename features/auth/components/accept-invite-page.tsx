@@ -72,26 +72,40 @@ export function AcceptInvitePage() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { isLoading, session, signOut } = useAuth()
-  const [status, setStatus] = React.useState<"idle" | "submitting" | "success">(
-    "idle"
-  )
+  const [status, setStatus] = React.useState<
+    "idle" | "submitting" | "success" | "error"
+  >("idle")
   const [error, setError] = React.useState<string | null>(null)
   const [isSigningOut, startSignOutTransition] = React.useTransition()
+  const attemptKeyRef = React.useRef<string | null>(null)
 
   const token = searchParams.get("token")?.trim() ?? ""
 
   React.useEffect(() => {
-    if (isLoading || !session || !token || status !== "idle") {
+    attemptKeyRef.current = null
+    setStatus("idle")
+    setError(null)
+  }, [token, session?.user.id])
+
+  React.useEffect(() => {
+    if (isLoading || !session || !token) {
+      return
+    }
+
+    const attemptKey = `${session.user.id}:${token}`
+
+    if (attemptKeyRef.current === attemptKey) {
       return
     }
 
     if (hasCompletedAcceptance(session.user.id, token)) {
+      attemptKeyRef.current = attemptKey
       setStatus("success")
       window.location.replace("/dashboard?tab=members")
       return
     }
 
-    let isMounted = true
+    attemptKeyRef.current = attemptKey
 
     setStatus("submitting")
     setError(null)
@@ -120,29 +134,20 @@ export function AcceptInvitePage() {
         }
 
         markAcceptanceCompleted(session.user.id, token)
-        if (isMounted) {
-          setStatus("success")
-        }
+        setStatus("success")
         toast.success("Invitation accepted.")
         window.location.replace("/dashboard?tab=members")
       } catch (error) {
-        if (!isMounted) {
-          return
-        }
         const message =
           error instanceof Error
             ? error.message
             : "Failed to accept the invitation."
 
         setError(message)
-        setStatus("idle")
+        setStatus("error")
       }
     })()
-
-    return () => {
-      isMounted = false
-    }
-  }, [isLoading, session, status, token])
+  }, [isLoading, session, token])
 
   function handleSwitchAccount() {
     startSignOutTransition(async () => {

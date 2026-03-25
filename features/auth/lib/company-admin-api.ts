@@ -731,15 +731,85 @@ export async function revokeCompanyInvitation(
   return { success: true }
 }
 
-export async function acceptCompanyInvitation(inviteToken: string) {
-  const client = getClient()
+function isInvitationPastExpiry(invitation: InvitationRow) {
+  if (!invitation.expires_at) {
+    return false
+  }
 
-  if (!inviteToken.trim()) {
+  const expiry = new Date(invitation.expires_at)
+
+  if (Number.isNaN(expiry.getTime())) {
+    return false
+  }
+
+  return expiry.getTime() <= Date.now()
+}
+
+export async function acceptCompanyInvitation(inviteToken: string) {
+  const trimmedToken = inviteToken.trim()
+  const client = getClient()
+  const currentUser = await getCurrentUser()
+
+  if (!trimmedToken) {
     throw new ApiError("token is required.", 400)
   }
 
+  const serviceClient = createServiceRoleSupabaseClient()
+
+  if (serviceClient) {
+    const { data: invitationData, error: invitationError } = await serviceClient
+      .from("company_invitations")
+      .select("id, company_id, email, role, status, token, expires_at, created_at")
+      .eq("token", trimmedToken)
+      .maybeSingle()
+
+    if (invitationError) {
+      throw toApiError(invitationError, "Failed to load the invitation.")
+    }
+
+    if (!invitationData) {
+      throw new ApiError("This invitation is invalid or no longer available.", 404)
+    }
+
+    const invitation = normalizeInvitationRow(invitationData)
+    const currentEmail = currentUser.email?.trim().toLowerCase() ?? ""
+    const invitedEmail = invitation.email.trim().toLowerCase()
+
+    if (!currentEmail || currentEmail !== invitedEmail) {
+      throw new ApiError(
+        `This invitation was sent to ${invitation.email}. Sign in with that email to accept it.`,
+        403
+      )
+    }
+
+    if (invitation.status === "revoked") {
+      throw new ApiError("This invitation has been revoked.", 400)
+    }
+
+    if (invitation.status === "accepted") {
+      return {
+        company_id: invitation.company_id,
+      }
+    }
+
+    if (invitation.status === "expired" || isInvitationPastExpiry(invitation)) {
+      if (invitation.status === "pending" && isInvitationPastExpiry(invitation)) {
+        const { error: updateError } = await serviceClient
+          .from("company_invitations")
+          .update({ status: "expired" })
+          .eq("id", invitation.id)
+
+        if (updateError) {
+          throw toApiError(updateError, "Failed to expire the invitation.")
+        }
+      }
+
+      throw new ApiError("This invitation has expired.", 400)
+    }
+  }
+
   const { data, error } = await client.rpc("accept_company_invitation", {
-    invite_token: inviteToken.trim(),
+    invite_token: trimmedToken,
   })
 
   if (error) {

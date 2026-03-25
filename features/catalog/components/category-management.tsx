@@ -56,7 +56,6 @@ import {
 } from "@/features/catalog/components/sortable-table"
 import { useAuth } from "@/features/auth/components/auth-provider"
 import { authFetch } from "@/features/auth/lib/auth-fetch"
-import { withCompanyScope } from "@/features/catalog/lib/company-scope"
 import { LoadItems } from "../services/services"
 
 type Category = {

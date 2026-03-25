@@ -248,6 +248,7 @@ export function SortableTableRow({
   )
 }
 
+/* eslint-disable react-hooks/refs */
 export function SortableTableDragHandle({
   label = "Drag to reorder row",
 }: {
@@ -295,3 +296,4 @@ export function SortableTableDragHandle({
     </TableCell>
   )
 }
+/* eslint-enable react-hooks/refs */
