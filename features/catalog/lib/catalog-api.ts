@@ -6,7 +6,7 @@ import { createRouteSupabaseClient } from "@/lib/supabase"
 
 type JsonRecord = Record<string, unknown>
 
-const CATEGORY_SELECT = "id, name, slug, created_at"
+const CATEGORY_SELECT = "id, name, slug, image_url, created_at"
 
 const FEEDBACK_SELECT = `
   id,
@@ -248,6 +248,10 @@ function buildCategoryPayload(record: JsonRecord, partial = false) {
 
   if ("slug" in record) {
     payload.slug = requireString(record, "slug")
+  }
+
+  if ("image_url" in record) {
+    payload.image_url = optionalString(record, "image_url")
   }
 
   if (!partial) {

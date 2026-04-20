@@ -64,6 +64,11 @@ import {
   SortableTableRow,
   usePersistedRowOrder,
 } from "@/features/catalog/components/sortable-table"
+import { CatalogImageFields } from "@/features/catalog/components/catalog-image-fields"
+import {
+  deleteCatalogImageFile,
+  uploadCatalogImageFile,
+} from "@/features/catalog/lib/catalog-image-upload"
 import { useAuth } from "@/features/auth/components/auth-provider"
 import { authFetch } from "@/features/auth/lib/auth-fetch"
 import { withCompanyScope } from "@/features/catalog/lib/company-scope"
@@ -91,6 +96,8 @@ type ProductOption = {
 type CollectionImage = {
   image_url: string
   alt_text: string
+  file?: File | null
+  preview_url?: string | null
 }
 
 type LinkedProduct = {
@@ -138,7 +145,7 @@ const emptyFormState: CollectionFormState = {
   currency: "USD",
   category_id: "",
   is_active: true,
-  images: [{ image_url: "", alt_text: "" }],
+  images: [{ image_url: "", alt_text: "", file: null, preview_url: null }],
   product_ids: [],
 }
 
@@ -230,11 +237,13 @@ function normalizeCollection(value: unknown): Collection {
     updated_at: getString(collection.updated_at) || null,
     category: normalizeCategory(collection.category),
     images: Array.isArray(collection.images)
-      ? collection.images.map((image) => {
+        ? collection.images.map((image) => {
           const row = image as Record<string, unknown>
           return {
             image_url: getString(row.image_url),
             alt_text: getString(row.alt_text),
+            file: null,
+            preview_url: null,
           }
         })
       : [],
@@ -303,6 +312,18 @@ function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Request failed."
 }
 
+function revokePreviewUrl(url?: string | null) {
+  if (url?.startsWith("blob:")) {
+    URL.revokeObjectURL(url)
+  }
+}
+
+function cleanupDraftImages(images: CollectionImage[]) {
+  for (const image of images) {
+    revokePreviewUrl(image.preview_url)
+  }
+}
+
 async function readErrorMessage(response: Response) {
   const text = await response.text()
 
@@ -338,6 +359,17 @@ export function CollectionManagement() {
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   const [deletingId, setDeletingId] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  const latestImagesRef = React.useRef<CollectionImage[]>(emptyFormState.images)
+
+  React.useEffect(() => {
+    latestImagesRef.current = form.images
+  }, [form.images])
+
+  React.useEffect(() => {
+    return () => {
+      cleanupDraftImages(latestImagesRef.current)
+    }
+  }, [])
 
   usePersistedRowOrder(collectionRowOrderStorageKey, items, !isLoading)
 
@@ -427,6 +459,7 @@ export function CollectionManagement() {
   }, [loadCollections, loadDependencies])
 
   function resetForm() {
+    cleanupDraftImages(latestImagesRef.current)
     setMode("create")
     setEditingId(null)
     setForm(emptyFormState)
@@ -447,6 +480,7 @@ export function CollectionManagement() {
   function startEditing(item: Collection) {
     setMode("edit")
     setEditingId(item.id)
+    cleanupDraftImages(latestImagesRef.current)
     setForm({
       slug: item.slug,
       name: item.name,
@@ -461,8 +495,10 @@ export function CollectionManagement() {
           ? item.images.map((image) => ({
               image_url: image.image_url,
               alt_text: image.alt_text,
+              file: null,
+              preview_url: null,
             }))
-          : [{ image_url: "", alt_text: "" }],
+          : [{ image_url: "", alt_text: "", file: null, preview_url: null }],
       product_ids: item.products
         .slice()
         .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
@@ -472,29 +508,78 @@ export function CollectionManagement() {
     setIsDialogOpen(true)
   }
 
-  function updateImage(index: number, key: keyof CollectionImage, value: string) {
+  function updateImageValue(
+    index: number,
+    key: "image_url" | "alt_text",
+    value: string
+  ) {
     setForm((current) => ({
       ...current,
-      images: current.images.map((image, imageIndex) =>
-        imageIndex === index ? { ...image, [key]: value } : image
-      ),
+      images: current.images.map((image, imageIndex) => {
+        if (imageIndex !== index) {
+          return image
+        }
+
+        if (key === "image_url" && image.file) {
+          revokePreviewUrl(image.preview_url)
+
+          return {
+            ...image,
+            image_url: value,
+            file: null,
+            preview_url: null,
+          }
+        }
+
+        return { ...image, [key]: value }
+      }),
+    }))
+  }
+
+  function selectImageFile(index: number, file: File | null) {
+    setForm((current) => ({
+      ...current,
+      images: current.images.map((image, imageIndex) => {
+        if (imageIndex !== index) {
+          return image
+        }
+
+        revokePreviewUrl(image.preview_url)
+
+        return {
+          ...image,
+          file,
+          preview_url: file ? URL.createObjectURL(file) : null,
+        }
+      }),
     }))
   }
 
   function addImage() {
     setForm((current) => ({
       ...current,
-      images: [...current.images, { image_url: "", alt_text: "" }],
+      images: [
+        ...current.images,
+        { image_url: "", alt_text: "", file: null, preview_url: null },
+      ],
     }))
   }
 
   function removeImage(index: number) {
     setForm((current) => ({
       ...current,
-      images:
-        current.images.length === 1
-          ? [{ image_url: "", alt_text: "" }]
-          : current.images.filter((_, imageIndex) => imageIndex !== index),
+      images: (() => {
+        const imageToRemove = current.images[index]
+        revokePreviewUrl(imageToRemove?.preview_url)
+
+        if (current.images.length === 1) {
+          return [
+            { image_url: "", alt_text: "", file: null, preview_url: null },
+          ]
+        }
+
+        return current.images.filter((_, imageIndex) => imageIndex !== index)
+      })(),
     }))
   }
 
@@ -511,6 +596,7 @@ export function CollectionManagement() {
     event.preventDefault()
 
     const priceAmount = Number(form.price_amount)
+    const uploadedPaths: string[] = []
     if (!Number.isFinite(priceAmount)) {
       const message = "Price amount must be a valid number."
       setError(message)
@@ -521,6 +607,41 @@ export function CollectionManagement() {
     try {
       setError(null)
       setIsSubmitting(true)
+      const images = (
+        await Promise.all(
+          form.images.map(async (image, index) => {
+            const alt_text = image.alt_text.trim() || null
+
+            if (image.file) {
+              const upload = await uploadCatalogImageFile({
+                companyId,
+                file: image.file,
+                scope: "collections",
+              })
+
+              uploadedPaths.push(upload.path)
+
+              return {
+                image_url: upload.url,
+                alt_text,
+                sort_order: index,
+              }
+            }
+
+            const image_url = image.image_url.trim()
+
+            if (!image_url) {
+              return null
+            }
+
+            return {
+              image_url,
+              alt_text,
+              sort_order: index,
+            }
+          })
+        )
+      ).filter((image): image is NonNullable<typeof image> => image !== null)
 
       const payload = {
         company_id: companyId,
@@ -532,13 +653,7 @@ export function CollectionManagement() {
         currency: form.currency.trim().toUpperCase(),
         category_id: form.category_id.trim() || null,
         is_active: form.is_active,
-        images: form.images
-          .map((image, index) => ({
-            image_url: image.image_url.trim(),
-            alt_text: image.alt_text.trim() || null,
-            sort_order: index,
-          }))
-          .filter((image) => image.image_url),
+        images,
         products: form.product_ids.map((product_id, index) => ({
           product_id,
           sort_order: index,
@@ -565,6 +680,17 @@ export function CollectionManagement() {
       closeDialog()
       await loadCollections(false)
     } catch (error) {
+      if (uploadedPaths.length > 0) {
+        await Promise.allSettled(
+          uploadedPaths.map((path) =>
+            deleteCatalogImageFile({
+              companyId,
+              path,
+            })
+          )
+        )
+      }
+
       const message = getErrorMessage(error)
       setError(message)
       toast.error(message)
@@ -859,40 +985,16 @@ export function CollectionManagement() {
               />
             </div>
 
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <Label>Images</Label>
-                <Button type="button" variant="outline" size="sm" onClick={addImage}>
-                  <PlusIcon />
-                  Add image
-                </Button>
-              </div>
-              <div className="space-y-3">
-                {form.images.map((image, index) => (
-                  <div key={`collection-image-${index}`} className="grid gap-3 border border-border p-3">
-                    <Input
-                      value={image.image_url}
-                      onChange={(event) =>
-                        updateImage(index, "image_url", event.target.value)
-                      }
-                      placeholder="Image URL"
-                    />
-                    <Input
-                      value={image.alt_text}
-                      onChange={(event) =>
-                        updateImage(index, "alt_text", event.target.value)
-                      }
-                      placeholder="Alt text"
-                    />
-                    <div className="flex justify-end">
-                      <Button type="button" variant="outline" size="sm" onClick={() => removeImage(index)}>
-                        Remove
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <CatalogImageFields
+              scopeLabel="collections"
+              images={form.images}
+              addImage={addImage}
+              updateImageValue={updateImageValue}
+              selectImageFile={selectImageFile}
+              removeImage={removeImage}
+              disabled={isSubmitting}
+              onError={setError}
+            />
 
             <div className="space-y-3">
               <Label>Products in collection</Label>

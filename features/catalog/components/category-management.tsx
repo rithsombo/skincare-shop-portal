@@ -2,12 +2,14 @@
 
 import * as React from "react"
 import {
+  ImageIcon,
   Loader,
   PencilIcon,
   PlusIcon,
   RefreshCcwIcon,
   Trash2Icon,
 } from "lucide-react"
+import Image from "next/image"
 import { toast } from "sonner"
 
 import {
@@ -56,12 +58,18 @@ import {
 } from "@/features/catalog/components/sortable-table"
 import { useAuth } from "@/features/auth/components/auth-provider"
 import { authFetch } from "@/features/auth/lib/auth-fetch"
+import {
+  deleteCatalogImageFile,
+  uploadCatalogImageFile,
+  type CatalogImageScope,
+} from "@/features/catalog/lib/catalog-image-upload"
 import { LoadItems } from "../services/services"
 
 type Category = {
   id: string
   name: string
   slug: string
+  image_url: string
   created_at?: string | null
 }
 
@@ -74,11 +82,17 @@ type CategoryManagementProps = {
 type CategoryFormState = {
   name: string
   slug: string
+  image_url: string
+  file: File | null
+  preview_url: string | null
 }
 
 const emptyFormState: CategoryFormState = {
   name: "",
   slug: "",
+  image_url: "",
+  file: null,
+  preview_url: null,
 }
 
 function getCategoryStorageKey(endpoint: string, companyId: string) {
@@ -96,8 +110,23 @@ function normalizeCategory(value: unknown): Category {
     id: getString(category.id),
     name: getString(category.name),
     slug: getString(category.slug),
+    image_url: getString(category.image_url),
     created_at: getString(category.created_at) || null,
   }
+}
+
+function revokePreviewUrl(url?: string | null) {
+  if (url?.startsWith("blob:")) {
+    URL.revokeObjectURL(url)
+  }
+}
+
+function getUploadScope(endpoint: string): CatalogImageScope {
+  if (endpoint.includes("product-categories")) {
+    return "product-categories"
+  }
+
+  return "collection-categories"
 }
 
 function extractCategories(payload: unknown) {
@@ -178,6 +207,7 @@ export function CategoryManagement({
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   const [deletingId, setDeletingId] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  const uploadScope = React.useMemo(() => getUploadScope(endpoint), [endpoint])
 
   const loadItems = React.useCallback(
     async (initialLoad = false) => {
@@ -219,6 +249,7 @@ export function CategoryManagement({
   usePersistedRowOrder(storageKey, items, !isLoading)
 
   function resetForm() {
+    revokePreviewUrl(form.preview_url)
     setMode("create")
     setEditingId(null)
     setForm(emptyFormState)
@@ -237,24 +268,57 @@ export function CategoryManagement({
   }
 
   function startEditing(item: Category) {
+    revokePreviewUrl(form.preview_url)
     setMode("edit")
     setEditingId(item.id)
-    setForm({ name: item.name, slug: item.slug })
+    setForm({
+      name: item.name,
+      slug: item.slug,
+      image_url: item.image_url,
+      file: null,
+      preview_url: null,
+    })
     setError(null)
     setIsDialogOpen(true)
   }
 
+  function selectImageFile(file: File | null) {
+    setForm((current) => {
+      revokePreviewUrl(current.preview_url)
+
+      return {
+        ...current,
+        file,
+        preview_url: file ? URL.createObjectURL(file) : null,
+      }
+    })
+  }
+
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    let uploadedPath: string | null = null
 
     try {
       setError(null)
       setIsSubmitting(true)
+      let imageUrl = form.image_url.trim()
+
+      if (form.file) {
+        const upload = await uploadCatalogImageFile({
+          companyId,
+          file: form.file,
+          scope: uploadScope,
+        })
+
+        uploadedPath = upload.path
+        imageUrl = upload.url
+      }
 
       const payload = {
         company_id: companyId,
         name: form.name.trim(),
         slug: form.slug.trim(),
+        image_url: imageUrl || null,
       }
 
       const isEditing = mode === "edit" && editingId
@@ -277,6 +341,15 @@ export function CategoryManagement({
       closeDialog()
       await loadItems(false)
     } catch (error) {
+      if (uploadedPath) {
+        await Promise.allSettled([
+          deleteCatalogImageFile({
+            companyId,
+            path: uploadedPath,
+          }),
+        ])
+      }
+
       const message = getErrorMessage(error)
       setError(message)
       toast.error(message)
@@ -368,6 +441,7 @@ export function CategoryManagement({
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-10" />
+                  <TableHead className="w-16">Photo</TableHead>
                   <TableHead>Name</TableHead>
                   <TableHead>Slug</TableHead>
                   <TableHead>Created</TableHead>
@@ -382,6 +456,24 @@ export function CategoryManagement({
                     className="data-[dragging=true]:z-10 data-[dragging=true]:opacity-80"
                   >
                     <SortableTableDragHandle />
+                    <TableCell>
+                      {item.image_url ? (
+                        <div className="border border-border p-1">
+                          <Image
+                            src={item.image_url}
+                            alt={item.name}
+                            width={40}
+                            height={40}
+                            unoptimized
+                            className="size-10 object-cover"
+                          />
+                        </div>
+                      ) : (
+                        <div className="flex size-10 items-center justify-center border border-dashed border-border text-muted-foreground">
+                          <ImageIcon className="size-3" />
+                        </div>
+                      )}
+                    </TableCell>
                     <TableCell>{item.name}</TableCell>
                     <TableCell className="text-muted-foreground">
                       {item.slug}
@@ -470,6 +562,65 @@ export function CategoryManagement({
                 }
                 required
               />
+            </div>
+            <div className="space-y-3">
+              <div className="space-y-2">
+                <Label htmlFor={`${title}-image-file`}>Photo</Label>
+                <Input
+                  id={`${title}-image-file`}
+                  type="file"
+                  accept="image/*"
+                  onChange={(event) => {
+                    setError(null)
+                    selectImageFile(event.target.files?.[0] ?? null)
+                    event.target.value = ""
+                  }}
+                  disabled={isSubmitting}
+                />
+                {form.file ? (
+                  <p className="text-[11px] text-muted-foreground">
+                    Selected file: {form.file.name}. It will upload on save.
+                  </p>
+                ) : null}
+              </div>
+              {form.preview_url || form.image_url ? (
+                <div className="space-y-2">
+                  <Label>Preview</Label>
+                  <div className="border border-border p-2">
+                    <Image
+                      src={form.preview_url || form.image_url}
+                      alt={form.name || `${title} preview`}
+                      width={1200}
+                      height={1200}
+                      unoptimized
+                      className="max-h-48 w-full object-contain"
+                    />
+                  </div>
+                </div>
+              ) : null}
+              <div className="space-y-2">
+                <Label htmlFor={`${title}-image-url`}>Photo URL</Label>
+                <Input
+                  id={`${title}-image-url`}
+                  value={form.image_url}
+                  onChange={(event) =>
+                    setForm((current) => {
+                      if (current.file) {
+                        revokePreviewUrl(current.preview_url)
+                      }
+
+                      return {
+                        ...current,
+                        image_url: event.target.value,
+                        file: null,
+                        preview_url: null,
+                      }
+                    })
+                  }
+                  placeholder="https://..."
+                  disabled={isSubmitting}
+                />
+              </div>
             </div>
             <DialogFooter className="px-0 pb-0">
               <DialogClose asChild>

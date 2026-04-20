@@ -65,6 +65,11 @@ import {
   SortableTableRow,
   usePersistedRowOrder,
 } from "@/features/catalog/components/sortable-table"
+import { CatalogImageFields } from "@/features/catalog/components/catalog-image-fields"
+import {
+  deleteCatalogImageFile,
+  uploadCatalogImageFile,
+} from "@/features/catalog/lib/catalog-image-upload"
 import { useAuth } from "@/features/auth/components/auth-provider"
 import { authFetch } from "@/features/auth/lib/auth-fetch"
 import { withCompanyScope } from "@/features/catalog/lib/company-scope"
@@ -87,6 +92,8 @@ type ProductImage = {
   id?: string
   image_url: string
   alt_text: string
+  file?: File | null
+  preview_url?: string | null
   sort_order?: number
 }
 
@@ -142,7 +149,7 @@ const emptyFormState: ProductFormState = {
   category_id: "",
   has_set_option: false,
   is_active: true,
-  images: [{ image_url: "", alt_text: "" }],
+  images: [{ image_url: "", alt_text: "", file: null, preview_url: null }],
   ingredients: [{ ingredient: "" }],
 }
 
@@ -184,6 +191,8 @@ function normalizeImages(value: unknown) {
       id: getString(image.id),
       image_url: getString(image.image_url),
       alt_text: getString(image.alt_text),
+      file: null,
+      preview_url: null,
       sort_order: getNumber(image.sort_order),
     }
   })
@@ -312,8 +321,10 @@ function productToFormState(product: Product): ProductFormState {
         ? product.images.map((image) => ({
             image_url: image.image_url,
             alt_text: image.alt_text,
+            file: null,
+            preview_url: null,
           }))
-        : [{ image_url: "", alt_text: "" }],
+        : [{ image_url: "", alt_text: "", file: null, preview_url: null }],
     ingredients:
       product.ingredients.length > 0
         ? product.ingredients.map((ingredient) => ({
@@ -386,6 +397,18 @@ function ProductTextarea({
   )
 }
 
+function revokePreviewUrl(url?: string | null) {
+  if (url?.startsWith("blob:")) {
+    URL.revokeObjectURL(url)
+  }
+}
+
+function cleanupDraftImages(images: ProductImage[]) {
+  for (const image of images) {
+    revokePreviewUrl(image.preview_url)
+  }
+}
+
 export function ProductManagement() {
   const { currentCompany } = useAuth()
   const companyId = currentCompany?.id ?? ""
@@ -406,52 +429,69 @@ export function ProductManagement() {
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   const [deletingId, setDeletingId] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  const latestImagesRef = React.useRef<ProductImage[]>(emptyFormState.images)
+
+  React.useEffect(() => {
+    latestImagesRef.current = form.images
+  }, [form.images])
+
+  React.useEffect(() => {
+    return () => {
+      cleanupDraftImages(latestImagesRef.current)
+    }
+  }, [])
 
   usePersistedRowOrder(productRowOrderStorageKey, products, !isLoading)
 
-  const loadProducts = React.useCallback(async (initialLoad = false) => {
-    try {
-      setError(null)
+  const loadProducts = React.useCallback(
+    async (initialLoad = false) => {
+      try {
+        setError(null)
 
-      if (initialLoad) {
-        setIsLoading(true)
-      } else {
-        setIsRefreshing(true)
-      }
+        if (initialLoad) {
+          setIsLoading(true)
+        } else {
+          setIsRefreshing(true)
+        }
 
-      if (!companyId) {
-        setProducts([])
-        return
-      }
+        if (!companyId) {
+          setProducts([])
+          return
+        }
 
-      const response = await authFetch(withCompanyScope(PRODUCTS_ENDPOINT, companyId), {
-        method: "GET",
-        cache: "no-store",
-      })
-
-      if (!response.ok) {
-        throw new Error(await readErrorMessage(response))
-      }
-
-      const payload = await response.json()
-      setProducts(
-        applyStoredRowOrder(
-          extractProducts(payload),
-          productRowOrderStorageKey
+        const response = await authFetch(
+          withCompanyScope(PRODUCTS_ENDPOINT, companyId),
+          {
+            method: "GET",
+            cache: "no-store",
+          }
         )
-      )
-    } catch (error) {
-      const message = getErrorMessage(error)
-      setError(message)
-      toast.error(message)
-    } finally {
-      if (initialLoad) {
-        setIsLoading(false)
-      } else {
-        setIsRefreshing(false)
+
+        if (!response.ok) {
+          throw new Error(await readErrorMessage(response))
+        }
+
+        const payload = await response.json()
+        setProducts(
+          applyStoredRowOrder(
+            extractProducts(payload),
+            productRowOrderStorageKey
+          )
+        )
+      } catch (error) {
+        const message = getErrorMessage(error)
+        setError(message)
+        toast.error(message)
+      } finally {
+        if (initialLoad) {
+          setIsLoading(false)
+        } else {
+          setIsRefreshing(false)
+        }
       }
-    }
-  }, [companyId, productRowOrderStorageKey])
+    },
+    [companyId, productRowOrderStorageKey]
+  )
 
   const loadCategories = React.useCallback(async () => {
     try {
@@ -460,10 +500,13 @@ export function ProductManagement() {
         return
       }
 
-      const response = await authFetch(withCompanyScope(PRODUCT_CATEGORIES_ENDPOINT, companyId), {
-        method: "GET",
-        cache: "no-store",
-      })
+      const response = await authFetch(
+        withCompanyScope(PRODUCT_CATEGORIES_ENDPOINT, companyId),
+        {
+          method: "GET",
+          cache: "no-store",
+        }
+      )
 
       if (!response.ok) {
         throw new Error(await readErrorMessage(response))
@@ -490,29 +533,78 @@ export function ProductManagement() {
     }))
   }
 
-  function updateImage(index: number, key: keyof ProductImage, value: string) {
+  function updateImageValue(
+    index: number,
+    key: "image_url" | "alt_text",
+    value: string
+  ) {
     setForm((current) => ({
       ...current,
-      images: current.images.map((image, imageIndex) =>
-        imageIndex === index ? { ...image, [key]: value } : image
-      ),
+      images: current.images.map((image, imageIndex) => {
+        if (imageIndex !== index) {
+          return image
+        }
+
+        if (key === "image_url" && image.file) {
+          revokePreviewUrl(image.preview_url)
+
+          return {
+            ...image,
+            image_url: value,
+            file: null,
+            preview_url: null,
+          }
+        }
+
+        return { ...image, [key]: value }
+      }),
+    }))
+  }
+
+  function selectImageFile(index: number, file: File | null) {
+    setForm((current) => ({
+      ...current,
+      images: current.images.map((image, imageIndex) => {
+        if (imageIndex !== index) {
+          return image
+        }
+
+        revokePreviewUrl(image.preview_url)
+
+        return {
+          ...image,
+          file,
+          preview_url: file ? URL.createObjectURL(file) : null,
+        }
+      }),
     }))
   }
 
   function addImage() {
     setForm((current) => ({
       ...current,
-      images: [...current.images, { image_url: "", alt_text: "" }],
+      images: [
+        ...current.images,
+        { image_url: "", alt_text: "", file: null, preview_url: null },
+      ],
     }))
   }
 
   function removeImage(index: number) {
     setForm((current) => ({
       ...current,
-      images:
-        current.images.length === 1
-          ? [{ image_url: "", alt_text: "" }]
-          : current.images.filter((_, imageIndex) => imageIndex !== index),
+      images: (() => {
+        const imageToRemove = current.images[index]
+        revokePreviewUrl(imageToRemove?.preview_url)
+
+        if (current.images.length === 1) {
+          return [
+            { image_url: "", alt_text: "", file: null, preview_url: null },
+          ]
+        }
+
+        return current.images.filter((_, imageIndex) => imageIndex !== index)
+      })(),
     }))
   }
 
@@ -547,6 +639,7 @@ export function ProductManagement() {
   }
 
   function resetForm() {
+    cleanupDraftImages(latestImagesRef.current)
     setMode("create")
     setEditingId(null)
     setForm(emptyFormState)
@@ -568,6 +661,7 @@ export function ProductManagement() {
     setError(null)
     setMode("edit")
     setEditingId(product.id)
+    cleanupDraftImages(latestImagesRef.current)
     setForm(productToFormState(product))
     setIsDialogOpen(true)
   }
@@ -576,6 +670,7 @@ export function ProductManagement() {
     event.preventDefault()
 
     const priceAmount = Number(form.price_amount)
+    const uploadedPaths: string[] = []
 
     if (!Number.isFinite(priceAmount)) {
       const message = "Price amount must be a valid number."
@@ -587,6 +682,41 @@ export function ProductManagement() {
     try {
       setError(null)
       setIsSubmitting(true)
+      const images = (
+        await Promise.all(
+          form.images.map(async (image, index) => {
+            const alt_text = image.alt_text.trim() || null
+
+            if (image.file) {
+              const upload = await uploadCatalogImageFile({
+                companyId,
+                file: image.file,
+                scope: "products",
+              })
+
+              uploadedPaths.push(upload.path)
+
+              return {
+                image_url: upload.url,
+                alt_text,
+                sort_order: index,
+              }
+            }
+
+            const image_url = image.image_url.trim()
+
+            if (!image_url) {
+              return null
+            }
+
+            return {
+              image_url,
+              alt_text,
+              sort_order: index,
+            }
+          })
+        )
+      ).filter((image): image is NonNullable<typeof image> => image !== null)
 
       const payload = {
         company_id: companyId,
@@ -599,13 +729,7 @@ export function ProductManagement() {
         category_id: form.category_id.trim() || null,
         has_set_option: form.has_set_option,
         is_active: form.is_active,
-        images: form.images
-          .map((image, index) => ({
-            image_url: image.image_url.trim(),
-            alt_text: image.alt_text.trim() || null,
-            sort_order: index,
-          }))
-          .filter((image) => image.image_url),
+        images,
         ingredients: form.ingredients
           .map((ingredient, index) => ({
             ingredient: ingredient.ingredient.trim(),
@@ -634,6 +758,17 @@ export function ProductManagement() {
       closeDialog()
       await loadProducts(false)
     } catch (error) {
+      if (uploadedPaths.length > 0) {
+        await Promise.allSettled(
+          uploadedPaths.map((path) =>
+            deleteCatalogImageFile({
+              companyId,
+              path,
+            })
+          )
+        )
+      }
+
       const message = getErrorMessage(error)
       setError(message)
       toast.error(message)
@@ -743,7 +878,7 @@ export function ProductManagement() {
             </div>
           ) : null}
 
-        {isLoading ? (
+          {isLoading ? (
             <div className="flex min-h-48 items-center justify-center text-muted-foreground">
               <Loader className="mr-2 animate-spin" />
               Loading products...
@@ -773,7 +908,9 @@ export function ProductManagement() {
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
-                <SortableTableBody itemIds={products.map((product) => product.id)}>
+                <SortableTableBody
+                  itemIds={products.map((product) => product.id)}
+                >
                   {products.map((product) => (
                     <SortableTableRow
                       key={product.id}
@@ -790,17 +927,25 @@ export function ProductManagement() {
                         </div>
                       </TableCell>
                       <TableCell>
-                        {formatPrice(product.price_amount, product.currency)}
+                        <div className="text-blue-400 text-smd font-semibold">
+                          {formatPrice(product.price_amount, product.currency)}
+                        </div>
                       </TableCell>
                       <TableCell>
                         <div className="flex gap-2">
                           <Badge
                             variant={product.is_active ? "default" : "outline"}
+                            className={cn(
+                              "bg-[#2F6B3F]",
+                              !product.is_active && "bg-yellow-700"
+                            )}
                           >
                             {product.is_active ? "Active" : "Inactive"}
                           </Badge>
                           {product.has_set_option ? (
-                            <Badge variant="secondary">Set option</Badge>
+                            <Badge variant="secondary" className="">
+                              Set option
+                            </Badge>
                           ) : null}
                         </div>
                       </TableCell>
@@ -824,7 +969,9 @@ export function ProductManagement() {
                           </Badge>
                         </div>
                       </TableCell>
-                      <TableCell>{formatTimestamp(product.updated_at)}</TableCell>
+                      <TableCell>
+                        {formatTimestamp(product.updated_at)}
+                      </TableCell>
                       <TableCell>
                         <div className="flex justify-end gap-2">
                           <Button
@@ -986,61 +1133,16 @@ export function ProductManagement() {
               />
             </div>
 
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <Label>Images</Label>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={addImage}
-                >
-                  <PlusIcon />
-                  Add image
-                </Button>
-              </div>
-              <div className="space-y-3">
-                {form.images.map((image, index) => (
-                  <div
-                    key={`image-${index}`}
-                    className="grid gap-3 border border-border p-3"
-                  >
-                    <div className="space-y-2">
-                      <Label htmlFor={`image-url-${index}`}>Image URL</Label>
-                      <Input
-                        id={`image-url-${index}`}
-                        value={image.image_url}
-                        onChange={(event) =>
-                          updateImage(index, "image_url", event.target.value)
-                        }
-                        placeholder="https://..."
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor={`image-alt-${index}`}>Alt text</Label>
-                      <Input
-                        id={`image-alt-${index}`}
-                        value={image.alt_text}
-                        onChange={(event) =>
-                          updateImage(index, "alt_text", event.target.value)
-                        }
-                        placeholder="Optional description"
-                      />
-                    </div>
-                    <div className="flex justify-end">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => removeImage(index)}
-                      >
-                        Remove
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <CatalogImageFields
+              scopeLabel="products"
+              images={form.images}
+              addImage={addImage}
+              updateImageValue={updateImageValue}
+              selectImageFile={selectImageFile}
+              removeImage={removeImage}
+              disabled={isSubmitting}
+              onError={setError}
+            />
 
             <div className="space-y-3">
               <div className="flex items-center justify-between">
@@ -1109,9 +1211,7 @@ export function ProductManagement() {
                 </Button>
               </DialogClose>
               <Button type="submit" disabled={isSubmitting}>
-                {isSubmitting ? (
-                  <Loader className="animate-spin" />
-                ) : null}
+                {isSubmitting ? <Loader className="animate-spin" /> : null}
                 {mode === "edit" ? "Update product" : "Create product"}
               </Button>
             </DialogFooter>

@@ -150,7 +150,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       clearPendingAuthRedirect()
       return
     }
-
     if (
       window.location.pathname === "/" ||
       window.location.pathname === "/login" ||
